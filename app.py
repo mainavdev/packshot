@@ -23,6 +23,7 @@ def ensure_date(df: pd.DataFrame) -> pd.DataFrame:
     if "Date de sortie" not in df.columns:
         raise ValueError("Colonne 'Date de sortie' manquante.")
     out = pd.to_datetime(df["Date de sortie"], errors="coerce", dayfirst=True, infer_datetime_format=True)
+    # Si beaucoup de NaT, tenter conversion FR -> EN
     if out.isna().mean() > 0.5:
         months = {
             "janvier":"january","février":"february","fevrier":"february","mars":"march","avril":"april","mai":"may",
@@ -40,7 +41,7 @@ def ensure_date(df: pd.DataFrame) -> pd.DataFrame:
 
 def top_df(df: pd.DataFrame, col: str, n: int) -> pd.DataFrame:
     s = df[col].value_counts().head(n).reset_index()
-    s.index = s.index + 1
+    s.index = s.index + 1  # Rang à partir de 1
     s.index.name = "Rang"
     s = s.rename(columns={"index": col, col: "Nombre"})
     return s
@@ -67,6 +68,8 @@ else:
                 df = pd.read_csv(up)
             elif name.endswith(".xlsx"):
                 df = pd.read_excel(up)
+            else:
+                st.error("Format non supporté. Utilise .csv ou .xlsx.")
             source_label = up.name
         except Exception as e:
             st.error(f"Erreur de lecture : {e}")
@@ -100,29 +103,117 @@ mask = (df["Date de sortie"] >= pd.to_datetime(date_range[0])) & (df["Date de so
 dfp = df.loc[mask].copy()
 st.success(f"{len(dfp)} éléments sur la période sélectionnée.")
 
-# -------------------- TOPS --------------------
+# -------------------- TOPS (tables par défaut) --------------------
 c1, c2 = st.columns(2)
 with c1:
     st.subheader("🏆 Top clients")
-    st.dataframe(top_df(dfp, "Client", top_n), use_container_width=True)
+    top_clients = top_df(dfp, "Client", top_n)
+    st.dataframe(top_clients, use_container_width=True)
+
     st.subheader("🏆 Top productions")
-    st.dataframe(top_df(dfp, "Production", top_n), use_container_width=True)
+    top_prods = top_df(dfp, "Production", top_n)
+    st.dataframe(top_prods, use_container_width=True)
+
 with c2:
     st.subheader("🏆 Top agences")
-    st.dataframe(top_df(dfp, "Agence", top_n), use_container_width=True)
-    st.subheader("🏆 Top réalisateurs")
-    st.dataframe(top_df(dfp, "Réalisateur", top_n), use_container_width=True)
+    top_ag = top_df(dfp, "Agence", top_n)
+    st.dataframe(top_ag, use_container_width=True)
 
-# -------------------- Timeline --------------------
+    st.subheader("🏆 Top réalisateurs")
+    top_real = top_df(dfp, "Réalisateur", top_n)
+    st.dataframe(top_real, use_container_width=True)
+
+# -------------------- Timeline (chart par défaut, table en option) --------------------
 st.subheader("📈 Répartition mensuelle")
 timeline = dfp.groupby(dfp["Date de sortie"].dt.to_period("M")).size().reset_index(name="Nombre")
 timeline["Mois"] = timeline["Date de sortie"].dt.to_timestamp()
 timeline_show = timeline[["Mois", "Nombre"]].sort_values("Mois")
+
 fig = px.bar(timeline_show, x="Mois", y="Nombre")
 st.plotly_chart(fig, use_container_width=True)
+if st.checkbox("📄 Voir les données (timeline)", key="table_timeline"):
+    tshow = timeline_show.copy()
+    tshow.index = tshow.index + 1
+    tshow.index.name = "Rang"
+    st.dataframe(tshow, use_container_width=True)
 
-# -------------------- Mode comparaison --------------------
-st.subheader("📊 Mode comparaison (deux périodes)")
+# -------------------- Analyses croisées (TOP N) --------------------
+st.subheader("🔁 Analyses croisées (TOP) — tables par défaut")
+
+tab_agence, tab_real, tab_prod, tab_client = st.tabs([
+    "Agence sélectionnée", "Réalisateur sélectionné", "Production sélectionnée", "Client sélectionné"
+])
+
+with tab_agence:
+    ag_list = sorted(dfp["Agence"].dropna().unique())
+    if ag_list:
+        ag_sel = st.selectbox("Choisir une agence", ag_list, key="ag_top")
+        sub = dfp[dfp["Agence"] == ag_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} productions (pour cette agence)**")
+            p = top_df(sub, "Production", top_n)
+            st.dataframe(p, use_container_width=True)
+        with colB:
+            st.markdown(f"**Top {top_n} réalisateurs (pour cette agence)**")
+            r = top_df(sub, "Réalisateur", top_n)
+            st.dataframe(r, use_container_width=True)
+    else:
+        st.info("Aucune agence disponible sur la période filtrée.")
+
+with tab_real:
+    r_list = sorted(dfp["Réalisateur"].dropna().unique())
+    if r_list:
+        r_sel = st.selectbox("Choisir un réalisateur", r_list, key="real_top")
+        sub = dfp[dfp["Réalisateur"] == r_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} productions (avec ce réalisateur)**")
+            p = top_df(sub, "Production", top_n)
+            st.dataframe(p, use_container_width=True)
+        with colB:
+            st.markdown(f"**Top {top_n} agences (avec ce réalisateur)**")
+            a = top_df(sub, "Agence", top_n)
+            st.dataframe(a, use_container_width=True)
+    else:
+        st.info("Aucun réalisateur disponible sur la période filtrée.")
+
+with tab_prod:
+    p_list = sorted(dfp["Production"].dropna().unique())
+    if p_list:
+        p_sel = st.selectbox("Choisir une production", p_list, key="prod_top")
+        sub = dfp[dfp["Production"] == p_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} agences (ayant travaillé avec cette production)**")
+            a = top_df(sub, "Agence", top_n)
+            st.dataframe(a, use_container_width=True)
+        with colB:
+            st.markdown(f"**Top {top_n} réalisateurs (ayant travaillé avec cette production)**")
+            r = top_df(sub, "Réalisateur", top_n)
+            st.dataframe(r, use_container_width=True)
+    else:
+        st.info("Aucune production disponible sur la période filtrée.")
+
+with tab_client:
+    c_list = sorted(dfp["Client"].dropna().unique())
+    if c_list:
+        c_sel = st.selectbox("Choisir un client", c_list, key="client_top")
+        sub = dfp[dfp["Client"] == c_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} agences (pour ce client)**")
+            a = top_df(sub, "Agence", top_n)
+            st.dataframe(a, use_container_width=True)
+        with colB:
+            st.markdown(f"**Top {top_n} productions (pour ce client)**")
+            p = top_df(sub, "Production", top_n)
+            st.dataframe(p, use_container_width=True)
+    else:
+        st.info("Aucun client disponible sur la période filtrée.")
+
+# -------------------- Mode comparaison (deux périodes) --------------------
+st.subheader("📊 Mode comparaison (deux périodes) — choisir le Top à comparer")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -136,13 +227,27 @@ dfa = df[(df["Date de sortie"] >= pd.to_datetime(a1)) & (df["Date de sortie"] <=
 dfb = df[(df["Date de sortie"] >= pd.to_datetime(b1)) & (df["Date de sortie"] <= pd.to_datetime(b2))]
 
 def compare_block(dfA, dfB, colname, label, n: int, key="cmp"):
-    ta = dfA[colname].value_counts().head(n).rename("Période A")
-    tb = dfB[colname].value_counts().head(n).rename("Période B")
-    comp = pd.concat([ta, tb], axis=1).fillna(0).astype(int)
-    comp = comp.copy()
-    comp.insert(0, "Nom", comp.index)  # <== conserve le nom
-    comp.index = range(1, len(comp) + 1)
-    comp.index.name = "Rang"
+    # Compter proprement, créer une vraie colonne Nom
+    ta = (
+        dfA[colname].fillna("Inconnu")
+        .value_counts()
+        .reset_index()
+        .rename(columns={"index": "Nom", colname: "Période A"})
+        .head(n)
+    )
+    tb = (
+        dfB[colname].fillna("Inconnu")
+        .value_counts()
+        .reset_index()
+        .rename(columns={"index": "Nom", colname: "Période B"})
+        .head(n)
+    )
+    # Joindre sur Nom (outer pour garder tout le monde)
+    comp = ta.merge(tb, on="Nom", how="outer").fillna(0)
+    # Trier (par défaut, plus forts en période B)
+    comp = comp.sort_values(["Période B", "Période A"], ascending=False).reset_index(drop=True)
+    comp.insert(0, "Rang", range(1, len(comp) + 1))
+    # Delta
     comp["Δ (B-A)"] = comp["Période B"] - comp["Période A"]
     st.markdown(f"**{label} (TOP {n})**")
     st.dataframe(comp, use_container_width=True)
