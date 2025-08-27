@@ -39,13 +39,6 @@ def ensure_date(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["Date de sortie"])
     return df
 
-def top_df(df: pd.DataFrame, col: str, n: int) -> pd.DataFrame:
-    s = df[col].value_counts().head(n).reset_index()
-    s.index = s.index + 1  # Rang commence à 1
-    s.index.name = "Rang"
-    s = s.rename(columns={"index": col, col: "Nombre"})
-    return s
-
 def normalize_text_cols(df: pd.DataFrame, cols):
     out = df.copy()
     for c in cols:
@@ -53,6 +46,13 @@ def normalize_text_cols(df: pd.DataFrame, cols):
             out[c] = out[c].astype(str).str.strip()
             out[c] = out[c].replace({"": "Inconnu", "nan": "Inconnu", "None": "Inconnu"})
     return out
+
+def top_df(df: pd.DataFrame, col: str, n: int) -> pd.DataFrame:
+    # Produit un tableau avec une vraie colonne "Rang" (1..N) + "Nombre"
+    s = df[col].value_counts().reset_index()
+    s.columns = [col, "Nombre"]
+    s.insert(0, "Rang", range(1, len(s) + 1))
+    return s.head(n)
 
 # -------------------- Sidebar --------------------
 st.sidebar.header("Paramètres")
@@ -76,6 +76,8 @@ else:
                 df = pd.read_csv(up)
             elif name.endswith(".xlsx"):
                 df = pd.read_excel(up)
+            else:
+                st.error("Format non supporté. Utilise .csv ou .xlsx.")
             source_label = up.name
         except Exception as e:
             st.error(f"Erreur de lecture : {e}")
@@ -112,37 +114,103 @@ mask = (df["Date de sortie"] >= pd.to_datetime(date_range[0])) & (df["Date de so
 dfp = df.loc[mask].copy()
 st.success(f"{len(dfp)} éléments sur la période sélectionnée.")
 
-# -------------------- TOPS --------------------
+# -------------------- TOPS (tables par défaut, index masqué) --------------------
 c1, c2 = st.columns(2)
 with c1:
     st.subheader("🏆 Top clients")
-    st.dataframe(top_df(dfp, "Client", top_n), use_container_width=True)
+    st.dataframe(top_df(dfp, "Client", top_n), use_container_width=True, hide_index=True)
 
     st.subheader("🏆 Top productions")
-    st.dataframe(top_df(dfp, "Production", top_n), use_container_width=True)
+    st.dataframe(top_df(dfp, "Production", top_n), use_container_width=True, hide_index=True)
 
 with c2:
     st.subheader("🏆 Top agences")
-    st.dataframe(top_df(dfp, "Agence", top_n), use_container_width=True)
+    st.dataframe(top_df(dfp, "Agence", top_n), use_container_width=True, hide_index=True)
 
     st.subheader("🏆 Top réalisateurs")
-    st.dataframe(top_df(dfp, "Réalisateur", top_n), use_container_width=True)
+    st.dataframe(top_df(dfp, "Réalisateur", top_n), use_container_width=True, hide_index=True)
 
-# -------------------- Timeline --------------------
+# -------------------- Timeline (chart par défaut, table en option) --------------------
 st.subheader("📈 Répartition mensuelle")
 timeline = dfp.groupby(dfp["Date de sortie"].dt.to_period("M")).size().reset_index(name="Nombre")
 timeline["Mois"] = timeline["Date de sortie"].dt.to_timestamp()
 timeline_show = timeline[["Mois", "Nombre"]].sort_values("Mois")
+
 fig = px.bar(timeline_show, x="Mois", y="Nombre")
 st.plotly_chart(fig, use_container_width=True)
 if st.checkbox("📄 Voir les données (timeline)", key="table_timeline"):
-    tshow = timeline_show.copy()
-    tshow.index = tshow.index + 1
-    tshow.index.name = "Rang"
-    st.dataframe(tshow, use_container_width=True)
+    # On peut garder un index caché aussi ici
+    st.dataframe(timeline_show.reset_index(drop=True), use_container_width=True, hide_index=True)
 
-# -------------------- Mode comparaison --------------------
-st.subheader("📊 Mode comparaison (deux périodes)")
+# -------------------- Analyses croisées (TOP N) --------------------
+st.subheader("🔁 Analyses croisées (TOP) — tables par défaut")
+
+tab_agence, tab_real, tab_prod, tab_client = st.tabs([
+    "Agence sélectionnée", "Réalisateur sélectionné", "Production sélectionnée", "Client sélectionné"
+])
+
+with tab_agence:
+    ag_list = sorted(dfp["Agence"].dropna().unique())
+    if ag_list:
+        ag_sel = st.selectbox("Choisir une agence", ag_list, key="ag_top")
+        sub = dfp[dfp["Agence"] == ag_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} productions (pour cette agence)**")
+            st.dataframe(top_df(sub, "Production", top_n), use_container_width=True, hide_index=True)
+        with colB:
+            st.markdown(f"**Top {top_n} réalisateurs (pour cette agence)**")
+            st.dataframe(top_df(sub, "Réalisateur", top_n), use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucune agence disponible sur la période filtrée.")
+
+with tab_real:
+    r_list = sorted(dfp["Réalisateur"].dropna().unique())
+    if r_list:
+        r_sel = st.selectbox("Choisir un réalisateur", r_list, key="real_top")
+        sub = dfp[dfp["Réalisateur"] == r_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} productions (avec ce réalisateur)**")
+            st.dataframe(top_df(sub, "Production", top_n), use_container_width=True, hide_index=True)
+        with colB:
+            st.markdown(f"**Top {top_n} agences (avec ce réalisateur)**")
+            st.dataframe(top_df(sub, "Agence", top_n), use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucun réalisateur disponible sur la période filtrée.")
+
+with tab_prod:
+    p_list = sorted(dfp["Production"].dropna().unique())
+    if p_list:
+        p_sel = st.selectbox("Choisir une production", p_list, key="prod_top")
+        sub = dfp[dfp["Production"] == p_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} agences (ayant travaillé avec cette production)**")
+            st.dataframe(top_df(sub, "Agence", top_n), use_container_width=True, hide_index=True)
+        with colB:
+            st.markdown(f"**Top {top_n} réalisateurs (ayant travaillé avec cette production)**")
+            st.dataframe(top_df(sub, "Réalisateur", top_n), use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucune production disponible sur la période filtrée.")
+
+with tab_client:
+    c_list = sorted(dfp["Client"].dropna().unique())
+    if c_list:
+        c_sel = st.selectbox("Choisir un client", c_list, key="client_top")
+        sub = dfp[dfp["Client"] == c_sel]
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**Top {top_n} agences (pour ce client)**")
+            st.dataframe(top_df(sub, "Agence", top_n), use_container_width=True, hide_index=True)
+        with colB:
+            st.markdown(f"**Top {top_n} productions (pour ce client)**")
+            st.dataframe(top_df(sub, "Production", top_n), use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucun client disponible sur la période filtrée.")
+
+# -------------------- Mode comparaison (deux périodes) --------------------
+st.subheader("📊 Mode comparaison (deux périodes) — choisir le Top à comparer")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -180,10 +248,7 @@ def compare_block(dfA, dfB, colname, label, n: int, key="cmp"):
     comp["Δ (B-A)"] = comp["Période B"] - comp["Période A"]
 
     st.markdown(f"**{label} (TOP {n})**")
-    st.dataframe(comp, use_container_width=True)
-
-    if st.checkbox("📊 Voir le graphique", key=f"{key}_chart"):
-        st.bar_chart(comp.set_index("Nom")[["Période A", "Période B"]])
+    st.dataframe(comp, use_container_width=True, hide_index=True)
 
 label_map = {"Client": "Top clients", "Agence": "Top agences", "Production": "Top productions", "Réalisateur": "Top réalisateurs"}
 compare_block(dfa, dfb, top_choice, label_map[top_choice], n=top_n, key=f"cmp_{top_choice}")
