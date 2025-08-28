@@ -55,7 +55,7 @@ def normalize_text_cols(df: pd.DataFrame, cols):
     return out
 
 # split robust pour réalisateurs multiples
-SPLIT_RE = re.compile(r"\s*(?:,|/|&| x | \+ | et )\s*", flags=re.IGNORECASE)
+SPLIT_RE = re.compile(r"\s*(?:,|/|&| x |\+| et )\s*", flags=re.IGNORECASE)
 
 def first_non_null(series: pd.Series):
     for v in series:
@@ -95,26 +95,25 @@ def detect_granularity(df: pd.DataFrame) -> str:
 
 def build_views(df_raw: pd.DataFrame):
     # normaliser colonnes + date + textes
-    df = normalize_columns(df_raw)
+    base_df = normalize_columns(df_raw)
     needed = ["href","Client","Agence","Production","Réalisateur","Date de sortie"]
-    # certaines bases "campagnes" n'ont pas forcément tous les champs — on comble
     for col in needed:
-        if col not in df.columns:
+        if col not in base_df.columns:
             if col == "href":
                 raise ValueError("Colonne clé 'href' (ou 'Film-href') manquante.")
-            df[col] = "Inconnu"
-    df = ensure_date(df)
-    df = normalize_text_cols(df, ["Client","Agence","Production","Réalisateur"])
+            base_df[col] = "Inconnu"
+    base_df = ensure_date(base_df)
+    base_df = normalize_text_cols(base_df, ["Client","Agence","Production","Réalisateur"])
 
-    detected = detect_granularity(df)
+    detected = detect_granularity(base_df)
     if detected == "campagnes":
-        campagnes = df.copy()
+        campagnes = base_df.copy()
         films = None
     else:
-        films = df.copy()
-        campagnes = aggregate_campaigns_from_films(df)
+        films = base_df.copy()
+        campagnes = aggregate_campaigns_from_films(base_df)
 
-    return campagnes, films, detected
+    return campagnes, films, detected, base_df
 
 def top_df(df: pd.DataFrame, label_col: str, n: int) -> pd.DataFrame:
     s = df[label_col].value_counts().reset_index()
@@ -125,11 +124,9 @@ def top_df(df: pd.DataFrame, label_col: str, n: int) -> pd.DataFrame:
 def top_director_by_campaigns(campagnes_df: pd.DataFrame, n: int) -> pd.DataFrame:
     # exploser les réalisateurs multiples pour compter 1 campagne par réal
     tmp = campagnes_df.copy()
-    # créer une liste de réals
     reals_lists = tmp["Réalisateur"].fillna("Inconnu").astype(str).apply(lambda s: [r for r in SPLIT_RE.split(s) if r])
     exploded = tmp.loc[reals_lists.index.repeat(reals_lists.str.len())].copy()
     exploded["Réalisateur"] = [r for lst in reals_lists for r in lst]
-    # compter par réal (chaque href apparaît une seule fois par réal)
     counts = exploded.drop_duplicates(["href","Réalisateur"])["Réalisateur"].value_counts().reset_index()
     counts.columns = ["Réalisateur","Nombre"]
     counts.insert(0, "Rang", range(1, len(counts) + 1))
@@ -165,7 +162,7 @@ if df_raw is None:
     st.stop()
 
 try:
-    campagnes_view, films_view, detected = build_views(df_raw)
+    campagnes_view, films_view, detected, base_df = build_views(df_raw)
 except Exception as e:
     st.error(f"Erreur de préparation des données : {e}")
     st.stop()
@@ -174,7 +171,6 @@ except Exception as e:
 if granularity.startswith("Campagnes"):
     df_work = campagnes_view.copy()
 else:
-    # si chargement d'un fichier campagnes mais on a demandé films, on ne peut pas remonter les films → on reste campagnes
     df_work = films_view if films_view is not None else campagnes_view.copy()
 
 st.caption(f"Source: {source_label} — jeu détecté: {detected} — granularité utilisée: {'campagnes' if granularity.startswith('Campagnes') else 'films'} — {len(df_work)} lignes")
@@ -231,30 +227,33 @@ st.plotly_chart(fig, use_container_width=True)
 if st.checkbox("📄 Voir les données (timeline)", key="table_timeline"):
     st.dataframe(timeline_show.reset_index(drop=True), use_container_width=True, hide_index=True)
 
-# -------------------- Analyses croisées (TOP N) --------------------
-st.subheader("🔁 Analyses croisées (TOP) — tables par défaut")
-
-tab_agence, tab_real, tab_prod, tab_client = st.tabs([
-    "Agence sélectionnée", "Réalisateur sélectionné", "Production sélectionnée", "Client sélectionné"
-])
+# -------------------- Analyses croisées (TOP N, triptiques) --------------------
+st.subheader("🔁 Analyses croisées (TOP) — triptyques")
 
 def top_for_selection(sub: pd.DataFrame, col: str, n: int, count_by_campaigns_director=False):
     if count_by_campaigns_director and col == "Réalisateur":
         return top_director_by_campaigns(sub, n)
     return top_df(sub, col, n)
 
+tab_agence, tab_real, tab_prod, tab_client = st.tabs([
+    "Agence sélectionnée", "Réalisateur sélectionné", "Production sélectionnée", "Client sélectionné"
+])
+
 with tab_agence:
     ag_list = sorted(dfp["Agence"].dropna().unique())
     if ag_list:
         ag_sel = st.selectbox("Choisir une agence", ag_list, key="ag_top")
         sub = dfp[dfp["Agence"] == ag_sel]
-        colA, colB = st.columns(2)
+        colA, colB, colC = st.columns(3)
         with colA:
-            st.markdown(f"**Top {top_n} productions (pour cette agence)**")
+            st.markdown(f"**Top {top_n} productions**")
             st.dataframe(top_for_selection(sub, "Production", top_n), use_container_width=True, hide_index=True)
         with colB:
-            st.markdown(f"**Top {top_n} réalisateurs (pour cette agence)**")
+            st.markdown(f"**Top {top_n} réalisateurs**")
             st.dataframe(top_for_selection(sub, "Réalisateur", top_n, count_by_campaigns_director=granularity.startswith('Campagnes')), use_container_width=True, hide_index=True)
+        with colC:
+            st.markdown(f"**Top {top_n} clients**")
+            st.dataframe(top_for_selection(sub, "Client", top_n), use_container_width=True, hide_index=True)
     else:
         st.info("Aucune agence disponible sur la période filtrée.")
 
@@ -263,13 +262,16 @@ with tab_real:
     if r_list:
         r_sel = st.selectbox("Choisir un réalisateur", r_list, key="real_top")
         sub = dfp[dfp["Réalisateur"] == r_sel]
-        colA, colB = st.columns(2)
+        colA, colB, colC = st.columns(3)
         with colA:
-            st.markdown(f"**Top {top_n} productions (avec ce réalisateur)**")
+            st.markdown(f"**Top {top_n} productions**")
             st.dataframe(top_for_selection(sub, "Production", top_n), use_container_width=True, hide_index=True)
         with colB:
-            st.markdown(f"**Top {top_n} agences (avec ce réalisateur)**")
+            st.markdown(f"**Top {top_n} agences**")
             st.dataframe(top_for_selection(sub, "Agence", top_n), use_container_width=True, hide_index=True)
+        with colC:
+            st.markdown(f"**Top {top_n} clients**")
+            st.dataframe(top_for_selection(sub, "Client", top_n), use_container_width=True, hide_index=True)
     else:
         st.info("Aucun réalisateur disponible sur la période filtrée.")
 
@@ -278,13 +280,16 @@ with tab_prod:
     if p_list:
         p_sel = st.selectbox("Choisir une production", p_list, key="prod_top")
         sub = dfp[dfp["Production"] == p_sel]
-        colA, colB = st.columns(2)
+        colA, colB, colC = st.columns(3)
         with colA:
-            st.markdown(f"**Top {top_n} agences (ayant travaillé avec cette production)**")
+            st.markdown(f"**Top {top_n} agences**")
             st.dataframe(top_for_selection(sub, "Agence", top_n), use_container_width=True, hide_index=True)
         with colB:
-            st.markdown(f"**Top {top_n} réalisateurs (ayant travaillé avec cette production)**")
+            st.markdown(f"**Top {top_n} réalisateurs**")
             st.dataframe(top_for_selection(sub, "Réalisateur", top_n, count_by_campaigns_director=granularity.startswith('Campagnes')), use_container_width=True, hide_index=True)
+        with colC:
+            st.markdown(f"**Top {top_n} clients**")
+            st.dataframe(top_for_selection(sub, "Client", top_n), use_container_width=True, hide_index=True)
     else:
         st.info("Aucune production disponible sur la période filtrée.")
 
@@ -293,18 +298,22 @@ with tab_client:
     if c_list:
         c_sel = st.selectbox("Choisir un client", c_list, key="client_top")
         sub = dfp[dfp["Client"] == c_sel]
-        colA, colB = st.columns(2)
+        colA, colB, colC = st.columns(3)
         with colA:
-            st.markdown(f"**Top {top_n} agences (pour ce client)**")
+            st.markdown(f"**Top {top_n} agences**")
             st.dataframe(top_for_selection(sub, "Agence", top_n), use_container_width=True, hide_index=True)
         with colB:
-            st.markdown(f"**Top {top_n} productions (pour ce client)**")
+            st.markdown(f"**Top {top_n} productions**")
             st.dataframe(top_for_selection(sub, "Production", top_n), use_container_width=True, hide_index=True)
+        with colC:
+            st.markdown(f"**Top {top_n} réalisateurs**")
+            st.dataframe(top_for_selection(sub, "Réalisateur", top_n, count_by_campaigns_director=granularity.startswith('Campagnes')), use_container_width=True, hide_index=True)
     else:
         st.info("Aucun client disponible sur la période filtrée.")
 
 # -------------------- Mode comparaison (deux périodes) --------------------
 st.subheader("📊 Mode comparaison (deux périodes) — choisir le Top à comparer")
+
 col1, col2 = st.columns(2)
 with col1:
     a1, a2 = st.date_input("Période A", [min_date.date(), (min_date + pd.Timedelta(days=30)).date()])
@@ -313,10 +322,7 @@ with col2:
 
 top_choice = st.selectbox("Comparer :", ["Client", "Agence", "Production", "Réalisateur"], index=0)
 
-dfa = df[(df["Date de sortie"] >= pd.to_datetime(a1)) & (df["Date de sortie"] <= pd.to_datetime(a2))]
-dfb = df[(df["Date de sortie"] >= pd.to_datetime(b1)) & (df["Date de sortie"] <= pd.to_datetime(b2))]
-
-# selon la granularité choisie, on doit reconstituer la vue correspondante pour A et B
+# Reconstituer la vue adaptée (base_df normalisé garanti)
 def view_for_period(df_all: pd.DataFrame, start, end):
     sub = df_all[(df_all["Date de sortie"] >= pd.to_datetime(start)) & (df_all["Date de sortie"] <= pd.to_datetime(end))].copy()
     if granularity.startswith("Campagnes"):
@@ -326,8 +332,8 @@ def view_for_period(df_all: pd.DataFrame, start, end):
     else:
         return sub
 
-dfa_view = view_for_period(df, a1, a2)
-dfb_view = view_for_period(df, b1, b2)
+dfa_view = view_for_period(base_df, a1, a2)
+dfb_view = view_for_period(base_df, b1, b2)
 
 def compare_block(dfA, dfB, colname, label, n: int, key="cmp"):
     def clean_labels(s: pd.Series) -> pd.Series:
